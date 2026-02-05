@@ -391,6 +391,140 @@ func TestClient_BookHandler(t *testing.T) {
 	}
 }
 
+func TestClient_OnMessage_Parsed(t *testing.T) {
+	received := make(chan MessageEvent, 1)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		msg := map[string]interface{}{
+			"channel": "ticker",
+			"type":    "update",
+			"data": []map[string]interface{}{
+				{
+					"symbol":     "BTC/USD",
+					"bid":        "50000.00",
+					"bid_qty":    "1.0",
+					"ask":        "50001.00",
+					"ask_qty":    "1.0",
+					"last":       "50000.50",
+					"volume":     "1000.0",
+					"vwap":       "49500.00",
+					"low":        "48000.00",
+					"high":       "51000.00",
+					"change":     "1500.00",
+					"change_pct": "3.0",
+				},
+			},
+		}
+		conn.WriteJSON(msg)
+
+		for {
+			_, _, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	client := New(wsURL)
+	client.OnMessage(func(ev MessageEvent) {
+		received <- ev
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := client.Connect(ctx); err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+	defer client.Close()
+
+	select {
+	case ev := <-received:
+		if !ev.Parsed {
+			t.Fatalf("expected Parsed=true, got false (err=%q)", ev.ParseError)
+		}
+		if len(ev.Raw) == 0 {
+			t.Error("expected raw payload")
+		}
+		if ev.ReceivedAt.IsZero() {
+			t.Error("expected ReceivedAt to be set")
+		}
+		if ev.ReceivedMonoNs < 0 {
+			t.Errorf("expected non-negative ReceivedMonoNs, got %d", ev.ReceivedMonoNs)
+		}
+		if ev.Message.Channel != ChannelTicker {
+			t.Errorf("expected channel %q, got %q", ChannelTicker, ev.Message.Channel)
+		}
+		if ev.Message.Type != "update" {
+			t.Errorf("expected type update, got %q", ev.Message.Type)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for OnMessage event")
+	}
+}
+
+func TestClient_OnMessage_ParseError(t *testing.T) {
+	received := make(chan MessageEvent, 1)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		conn.WriteMessage(websocket.TextMessage, []byte("not json"))
+
+		for {
+			_, _, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	client := New(wsURL)
+	client.OnMessage(func(ev MessageEvent) {
+		received <- ev
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := client.Connect(ctx); err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+	defer client.Close()
+
+	select {
+	case ev := <-received:
+		if ev.Parsed {
+			t.Fatalf("expected Parsed=false, got true: %+v", ev.Message)
+		}
+		if ev.ParseError == "" {
+			t.Fatal("expected ParseError")
+		}
+		if len(ev.Raw) == 0 {
+			t.Error("expected raw payload")
+		}
+		if ev.ReceivedAt.IsZero() {
+			t.Error("expected ReceivedAt to be set")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for OnMessage parse error event")
+	}
+}
+
 func TestClient_OHLCHandler(t *testing.T) {
 	receivedOHLC := make(chan []OHLCData, 1)
 

@@ -19,6 +19,9 @@ type Client struct {
 	// Token is the authentication token for private channels.
 	token string
 
+	// startTime is used to compute monotonic receive timestamps.
+	startTime time.Time
+
 	// conn is the underlying WebSocket connection.
 	conn *websocket.Conn
 	// mu protects conn, token, and connection state (connected, reconnecting, closed).
@@ -53,6 +56,7 @@ type Client struct {
 	onHeartbeat  func(*HeartbeatData)
 	onExecution  func([]ExecutionData)
 	onBalance    func([]BalanceData)
+	onMessage    func(MessageEvent)
 	onError      func(error)
 	onConnect    func()
 	onDisconnect func()
@@ -122,6 +126,7 @@ func New(url string, opts ...Option) *Client {
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &Client{
 		url:                  url,
+		startTime:            time.Now(),
 		reconnectInterval:    5 * time.Second,
 		maxReconnectInterval: 60 * time.Second,
 		maxReconnectAttempts: 0, // 0 means unlimited
@@ -363,7 +368,9 @@ func (c *Client) readLoop() {
 			return
 		}
 
-		go c.handleMessage(data)
+		recvTime := time.Now()
+		recvMonoNs := time.Since(c.startTime).Nanoseconds()
+		go c.handleMessage(data, recvTime, recvMonoNs)
 	}
 }
 
@@ -502,16 +509,39 @@ func (c *Client) resubscribe() {
 }
 
 // handleMessage processes an incoming WebSocket message.
-func (c *Client) handleMessage(data []byte) {
+func (c *Client) handleMessage(data []byte, recvTime time.Time, recvMonoNs int64) {
 	var msg BaseMessage
 	if err := json.Unmarshal(data, &msg); err != nil {
 		c.handlerMu.RLock()
+		onMessage := c.onMessage
 		onError := c.onError
 		c.handlerMu.RUnlock()
+		if onMessage != nil {
+			onMessage(MessageEvent{
+				Raw:            data,
+				ReceivedAt:     recvTime,
+				ReceivedMonoNs: recvMonoNs,
+				Parsed:         false,
+				ParseError:     err.Error(),
+			})
+		}
 		if onError != nil {
 			onError(fmt.Errorf("failed to parse message: %w", err))
 		}
 		return
+	}
+
+	c.handlerMu.RLock()
+	onMessage := c.onMessage
+	c.handlerMu.RUnlock()
+	if onMessage != nil {
+		onMessage(MessageEvent{
+			Raw:            data,
+			ReceivedAt:     recvTime,
+			ReceivedMonoNs: recvMonoNs,
+			Parsed:         true,
+			Message:        msg,
+		})
 	}
 
 	// Handle response to pending request
@@ -820,6 +850,16 @@ func (c *Client) OnExecution(fn func([]ExecutionData)) {
 func (c *Client) OnBalance(fn func([]BalanceData)) {
 	c.handlerMu.Lock()
 	c.onBalance = fn
+	c.handlerMu.Unlock()
+}
+
+// OnMessage sets the handler for all inbound WebSocket messages (including control responses).
+//
+// The handler is invoked from the client's internal read pipeline, so it must return quickly
+// and must treat event.Raw as immutable.
+func (c *Client) OnMessage(fn func(MessageEvent)) {
+	c.handlerMu.Lock()
+	c.onMessage = fn
 	c.handlerMu.Unlock()
 }
 

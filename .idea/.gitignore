@@ -6,3 +6,8 @@
 # Datasource local storage ignored files
 /dataSources/
 /dataSources.local.xml
+
+# Local IDE metadata (do not commit)
+/copilot.data.migration.ask2agent.xml
+/kraken-sdk.iml
+/modules.xml
