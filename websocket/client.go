@@ -24,6 +24,8 @@ type Client struct {
 
 	// conn is the underlying WebSocket connection.
 	conn *websocket.Conn
+	// writeMu serializes all writes to conn.
+	writeMu sync.Mutex
 	// mu protects conn, token, and connection state (connected, reconnecting, closed).
 	mu sync.RWMutex
 
@@ -272,10 +274,12 @@ func (c *Client) sendMessage(msg interface{}) error {
 		return fmt.Errorf("failed to marshal message: %w", err)
 	}
 
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+
 	if err := conn.SetWriteDeadline(time.Now().Add(c.writeTimeout)); err != nil {
 		return err
 	}
-
 	return conn.WriteMessage(websocket.TextMessage, data)
 }
 
